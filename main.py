@@ -1,15 +1,16 @@
 import numpy as np
+import torch
 from tensorflow import Tensor
 from torch import LongTensor, FloatTensor
 from transformers import AutoTokenizer, RobertaForSequenceClassification, get_linear_schedule_with_warmup, \
     RobertaTokenizer
 import matplotlib.pyplot as plt
-import torch
 import pandas as pd
-import torch
 from transformers import AdamW, get_linear_schedule_with_warmup
 from torch.utils.data import DataLoader, TensorDataset, random_split
 from transformers.modeling_outputs import SequenceClassifierOutput
+
+torch.set_default_device('cuda')
 
 tokenizer = RobertaTokenizer.from_pretrained('DeepChem/ChemBERTa-77M-MLM', from_pt=True)
 
@@ -17,6 +18,7 @@ print("Loading Datasets")
 df = pd.concat(map(pd.read_csv, ['Training_Smiles.csv']))
 # df = pd.concat(map(pd.read_csv, ['Testing_Smiles.csv', 'Training_Smiles.csv']))
 smiles = df['Smiles'].tolist()
+# print(len(df[df['Property'] == 1]), len(df[df['Property'] == 0]))
 labels = df['Property'].tolist()
 
 encodings = tokenizer(smiles, padding=True, truncation=True, return_tensors='pt')
@@ -29,12 +31,12 @@ print("Loading Pre-Trained Model")
 
 model: RobertaForSequenceClassification = RobertaForSequenceClassification.from_pretrained(
     'DeepChem/ChemBERTa-77M-MLM',
-    num_labels=2, # The number of output labels--2 for binary classification.
+    num_labels=2,  # The number of output labels--2 for binary classification.
     output_attentions=False,
     output_hidden_states=True,
 )
 
-
+print("Using {} for model".format(model.device))
 optimizer = AdamW(model.parameters(), lr=2e-5)
 
 dataset = TensorDataset(encodings['input_ids'], encodings['attention_mask'], labels)
@@ -45,15 +47,16 @@ test_size = len(dataset) - train_size - val_size
 
 
 print("Len of training, val, test:", train_size, val_size, test_size)
-train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size])
+train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size], 
+                                                        generator=torch.Generator(device='cuda'))
 
 batch_size = 32
 
-train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True)
-test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
+train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
+val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-num_epochs = 20
+num_epochs = 2000
 
 total_steps = len(train_dataloader) * num_epochs
 scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=total_steps)
@@ -71,7 +74,7 @@ for epoch in range(num_epochs):
         inputs = {'input_ids': batch[0], 'attention_mask': batch[1], 'labels': batch[2]}
         outputs = model(**inputs)
         loss: FloatTensor = outputs.loss
-        mean_loss += loss.detach().numpy()
+        mean_loss += loss.cpu().detach().numpy()
         loss.backward()
         optimizer.step()
         scheduler.step()
@@ -84,9 +87,9 @@ for epoch in range(num_epochs):
         with torch.no_grad():
             inputs = {'input_ids': batch[0], 'attention_mask': batch[1], 'labels': batch[2]}
             outputs: SequenceClassifierOutput = model(**inputs)
-
             # Evaluate your validation metrics here
-            predictions = np.argmax(outputs.logits, axis=1)
+            outputs_ = outputs.logits.cpu()
+            predictions = np.argmax(outputs_, axis=1)
             for pred, real in zip(predictions, batch[2]):
                 if pred == real:
                     accuracy += 1
@@ -100,7 +103,8 @@ for epoch in range(num_epochs):
             outputs: SequenceClassifierOutput = model(**inputs)
 
             # Evaluate your validation metrics here
-            predictions = np.argmax(outputs.logits, axis=1)
+            outputs_ = outputs.logits.cpu()
+            predictions = np.argmax(outputs_, axis=1)
             for pred, real in zip(predictions, batch[2]):
                 if pred == real:
                     accuracy += 1
@@ -128,12 +132,13 @@ for batch in test_dataloader:
         outputs: SequenceClassifierOutput = model(**inputs)
 
         # Evaluate your validation metrics here
-        list_output = outputs.logits.detach().numpy().tolist()
-        label_ = batch[2].detach().numpy()
+        list_output = outputs.logits.cpu().detach().numpy().tolist()
+        label_ = batch[2].cpu().detach().numpy()
         for label, out in zip(label_, list_output):
             output_rec[label].append(out)
 
-        predictions = np.argmax(outputs.logits, axis=1)
+        outputs_ = outputs.logits.cpu()
+        predictions = np.argmax(outputs_, axis=1)
         for pred, real in zip(predictions, batch[2]):
             if pred == real:
                 accuracy += 1
